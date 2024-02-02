@@ -34,33 +34,57 @@
  * @param data 
  * @return int 
  */
-int output_report(hid_device *handle, unsigned char *pdata)
+int output_report(hid_device *handle, unsigned char *pdata_wr, unsigned char *pdata_rd, size_t wrsize, size_t rdsize)
 {
-	unsigned char buf[BUFFLENGTH];
 	int res;
-	const size_t size = 32 + 5;
+	size_t size = 32 + 5; // Always write 32 bytes, the bytes outside of WrSize and RdSize will be ignored.
+	unsigned char input[64];
+	int timeout_milliseconds = 1000;
 
-#ifdef DEBUG_FRAMES
-	wprintf(L"sending:\n");
-	memcpy(&buf[0], pdata, size);
-	for (int i = 0; i < size; i++)
+	if (wrsize != 0)
 	{
-		wprintf(L"%d 0x%02x\n", i, buf[i]);
+		wprintf(L"sending a 32 bytes HID report:\n");
+		for (int i = 0; i < size; i++)
+		{
+			if (i == 5)
+				wprintf(L"data:\n");
+			wprintf(L"%02d 0x%02x %c", i, pdata_wr[i], pdata_wr[i]);
+			if (i >= 5 + wrsize)
+				wprintf(L" -\n");
+			else
+				wprintf(L"\n");
+		}
+		res = hid_write(handle, pdata_wr, size);
 	}
-#endif
-	res = hid_write(handle, buf, size);
+	if (rdsize != 0)
+	{
+		wprintf(L"reading a 32 bytes HID response report:\n");
+		memset(input, 0, sizeof(input));
+		size = 32 + 4; // Input report size
+		res = hid_read_timeout(handle, input, size, timeout_milliseconds);
+		if (res == size && input[2] == rdsize)
+		{
+			memcpy(pdata_rd, &input[4], rdsize);
+		}
+		else
+		{
+			wprintf(L"read of a 32 bytes HID report failed!\n");
+		}
+	}
 	return res;
 }
 
 /**
- * @brief Perform a write or read on the chip I2C bus
+ * @brief @brief Perform a write or read on the chip I2C bus
  * 
  * @param handle 
- * @param pdata 
- * @param size 
+ * @param pdata    W
+ * @param pdata_in R
+ * @param wrsize
+ * @param rdsize 
  * @return int 
  */
-int HID_EXAR_I2C_out(hid_device *handle, unsigned char *pdata, size_t wrsize, size_t rdsize)
+int HID_EXAR_I2C_out(hid_device *handle, unsigned char *pdata, unsigned char *pdata_in, size_t wrsize, size_t rdsize)
 {
 	const unsigned char i2c_device_address = 0xA0;
 	unsigned char buf[BUFFLENGTH];
@@ -69,14 +93,14 @@ int HID_EXAR_I2C_out(hid_device *handle, unsigned char *pdata, size_t wrsize, si
 	memset(buf, 0, sizeof(buf));
 	buf[0] = 0x0;       // Report ID read or write
 	buf[1] = STARTBIT | STOPBIT | 0xE0;  // Flags + sequence number
-    buf[2] = wrsize;// > 0? 32 : 0;  // Bytes to write
-    buf[3] = rdsize > 0? 32 : 0;  // Bytes to read
+    buf[2] = wrsize;  // > 0? 32 : 0;  // Bytes to write
+    buf[3] = rdsize;  // Bytes to read
 	buf[4] = i2c_device_address;
 #ifdef DEBUG_FRAMES
-	wprintf(L"writing %d reading %d\n", wrsize, rdsize);
+	wprintf(L"writing %d bytes, reading %d bytes\n", wrsize, rdsize);
 #endif
 	memcpy(&buf[5], pdata, wrsize); // Data
-	res = output_report(handle, buf);
+	res = output_report(handle, buf, pdata_in, wrsize, rdsize);
 	return res;
 }
 
@@ -93,74 +117,50 @@ int HID_EXAR_I2C_out(hid_device *handle, unsigned char *pdata, size_t wrsize, si
 int eeprom_page_write(hid_device *handle, unsigned short eeprom_address, unsigned char *pdata, size_t wrsize, size_t rdsize)
 {
 	unsigned char buf[BUFFLENGTH];
+	unsigned char rd_buf[BUFFLENGTH];
 	int res;
 
 	memset(buf, 0, sizeof(buf));
-	buf[0] = (eeprom_address >> 8) & 0xFF; // epprom address HI
+	buf[0] = (eeprom_address >> 8) & 0x0F; // epprom address HI
 	buf[1] = (eeprom_address >> 0) & 0xFF; // epprom address LO
 	memcpy(&buf[2], pdata, wrsize); // Data
-	res = HID_EXAR_I2C_out(handle, buf, wrsize + 2, rdsize);
-	return res;
-}
-
-/**
- * @brief Read the 24C01 EEPROM using the EXAR HID interface
- *        Always reading the 32bytes of a page
- *        p32 of the datasheet
- * 
- * @param address    I2C address
- * @param pdata      data to be written
- * @return int -1 if failure, number of written bytes
- */
-int eeprom_page_read(hid_device *handle, unsigned short eeprom_address, unsigned char *pdata)
-{
-	unsigned char buf[BUFFLENGTH];
-	int res;
-	size_t wrsize, rdsize;
-
-	wprintf(L"Write the start address\n");
-	wrsize = 0;
-	rdsize = 0;
-	res = eeprom_page_write(handle, eeprom_address, buf, wrsize, rdsize);
-	wprintf(L"Write the start address returned %d\n", res);
-	if (res >= 0)
-	{
-		// Read the return data
-		memset(buf, 0, sizeof(buf));
-		rdsize = 32;
-		res = HID_EXAR_I2C_out(handle, buf, wrsize, rdsize);
-		for (int i = 0; i < 32; i++)
-		{
-			wprintf(L"%d 0x%02x\n", i, buf[i]);
-		}
-	}
+	res = HID_EXAR_I2C_out(handle, buf, rd_buf, wrsize + 2, rdsize);
 	return res;
 }
 
 /**
  * @brief Reads the 24C01 EEPROM using the EXAR HID interface
+ *        Always reading the 32bytes of a page
  *        p32 of the datasheet
  * 
- * @param address 
- * @param data 
- * @return int -1 if failure, number of received bytes otherwise
+ * @param handle 
+ * @param eeprom_address 
+ * @param pdata_in 
+ * @return int 
  */
-int eeprom_read_response(hid_device *handle, unsigned char *pdata, size_t len)
+int eeprom_page_read(hid_device *handle, unsigned short eeprom_address, unsigned char *pdata_in)
 {
-	unsigned char statusflags;
-	unsigned char wrbytes;
-	unsigned char rdbytes;
-	unsigned char buf[BUFFLENGTH];
 	int res;
+	size_t wrsize, rdsize;
+	unsigned char data_out[BUFFLENGTH];
 
-	res = hid_read_timeout(handle, pdata, len, 500);
-	if (res > 4)
+#ifdef DEBUG_FRAMES
+	wprintf(L"R/W Start address @ 0x%X\n", eeprom_address);
+#endif //DEBUG_FRAMES
+	wrsize = 2;
+	memset(data_out, 0, sizeof(data_out) / sizeof(unsigned char));
+	data_out[0] = (eeprom_address >> 8) & 0x0F; // epprom address HI only the 4 lower bits are usefull
+	data_out[1] = (eeprom_address >> 0) & 0xFF; // epprom address LO
+	// Read the return data
+	memset(pdata_in, 0, 64);
+	rdsize = 32;
+	res = HID_EXAR_I2C_out(handle, data_out, pdata_in, wrsize, rdsize);
+#ifdef DEBUG_FRAMES
+	for (int i = 0; i < 32; i++)
 	{
-		statusflags = buf[0];
-		wrbytes = buf[1];
-		rdbytes = buf[2];
-		wprintf(L"Status 0x%02X Written %d read %d\n", statusflags, wrbytes, rdbytes);
+		wprintf(L"r 0x%02x 0x%02x %c\n", eeprom_address + i, pdata_in[i], pdata_in[i]);
 	}
+#endif //DEBUG_FRAMES
 	return res;
 }
 
@@ -199,13 +199,14 @@ void open_I2C_HID()
 	//
 //#define WRITEEEPROM
 #ifdef WRITEEEPROM
+#define WRITE_NUMERS
 #ifdef WRITE_NUMERS
 	wprintf(L"Writing 1 2 3 4...\n");
 	for (int i = 0; i < 32; i++)
 	{
 		data[i] = i;
 	}
-	wrsize = 30; // Maximum length
+	wrsize = 16; // Maximum length
 	res = eeprom_page_write(handle, eeprom_address, data, wrsize, rdsize);
 #else
 	sprintf(data, "-> Test write on the EEPROM.");
@@ -217,182 +218,18 @@ void open_I2C_HID()
 	//
 	// Do an EEPROM Read on the I2C bus
 	//
+#define READ_EEPROM
+#ifdef READ_EEPROM
 	eeprom_address = 0;
 	res = eeprom_page_read(handle, eeprom_address, data);
 	wprintf(L"eeprom_page_read returned %d\n", res);
-#ifdef WRITE_NUMERS
-	rdsize = 32;
-	res = eeprom_read_response(handle, data, rdsize);
+	/*
 	for (int i = 0; i < 32; i++)
 	{
 		wprintf(L"D%d=0x%x\n", i, data[i]);
 	}
-#else
-	rdsize = 32;
-	res = eeprom_read_response(handle, data, rdsize);
-	data[42] = 0;
-	wprintf(L"eeprom_read_response returned %d \"%s\"\n", res, data);
-	for (int i = 0; i < 32; i++)
-	{
-		wprintf(L"D%d=0x%x\n", i, data[i]);
-	}
-#endif
-}
-
-/**
- * @brief EDGE interface
- * 
- * @param address 
- * @param data 
- * @return int 
- */
-int hid_edge_write_register(hid_device *handle, u_int16_t address, u_int16_t data)
-{
-	unsigned char buf[BUFFLENGTH];
-	int res;
-
-	wprintf(L"Write address 0x%04x\n", address);
-	buf[0] = 0x3C;                  // Write HID register
-	buf[1] = (address & 0xFF);      // Write address LSB
-    buf[2] = (address >> 8) & 0xFF; // Write address MSB
-	buf[3] = (data & 0xFF);         // Write data LSB
-    buf[4] = (data >> 8) & 0xFF;    // Write data MSB
-	res = hid_send_feature_report(handle, buf, 5);
-	wprintf(L"wr result res=%d 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n", res, buf[0], buf[1], buf[2], buf[3], buf[4]);
-	return res;
-}
-
-/**
- * @brief EDGE read address
- * 
- * @return int 
- */
-int hid_edge_set_read_address(hid_device *handle, u_int16_t address)
-{
-	unsigned char buf[BUFFLENGTH];
-	int res;
-	
-	wprintf(L"set read address 0x%04x\n", address);
-	buf[0] = 0x4B;                  // Set address for HID register read
-	buf[1] = (address & 0xFF);      // Write address LSB
-    buf[2] = (address >> 8) & 0xFF; // Write address MSB
-	buf[3] = 0;
-	//wprintf(L"set read @ wr 0x%02x 0x%02x 0x%02x 0x%02x\n", res, buf[0], buf[1], buf[2], buf[3]);
-	res = hid_send_feature_report(handle, buf, 3);
-	wprintf(L"set read @ result res=%d 0x%02x 0x%02x 0x%02x 0x%02x\n", res, buf[0], buf[1], buf[2], buf[3]);
-	return res;
-}
-
-/**
- * @brief EDGE read register @address
- * 
- * @return int 
- */
-int hid_edge_read_register(hid_device *handle)
-{
-	unsigned char buf[BUFFLENGTH];
-	int res;
-	int milliseconds = 100;
-
-	int  nonblock = 1;
-	//hid_set_nonblocking(handle, nonblock);
-	wprintf(L"read\n");
-	buf[0] = 0x5A;    // Read HID register
-	buf[1] = 0x00;
-    buf[2] = 0x00;
-	//res = hid_send_feature_report(handle, buf, 3);
-	//wprintf(L"wr result res=%d 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n", res, buf[0], buf[1], buf[2], buf[3], buf[4]);
-	res = hid_get_feature_report(handle, buf, 3);
-	wprintf(L"-> read result res=%d 0x%02x 0x%02x 0x%02x\n", res, buf[0], buf[1], buf[2]);
-	return res;
-}
-
-#define EDGE_FUNC_SEL_ADDR 0x3C0
-#define EDGE_DIR_ADDR 0x3C1
-#define EDGE_SET_ADDR 0x3C2
-#define EDGE_CLEAR_ADDR 0x3C3
-#define EDGE_PWM0_CTRL_ADDR 0x3D8
-#define EDGE_PWM0_HIGH_ADDR 0x3D9
-#define EDGE_PWM0_LOW_ADDR  0x3DA
-#define EDGE_PWM1_CTRL_ADDR 0x3DB
-#define EDGE_PWM1_HIGH_ADDR 0x3DC
-#define EDGE_PWM1_LOW_ADDR  0x3DD
-
-int read_reg(hid_device *handle, u_int16_t address)
-{
-	hid_edge_set_read_address(handle, address);
-	hid_edge_read_register(handle);
-}
-
-int initPWM(hid_device *handle)
-{
-	u_int16_t pwm_mode;
-
-	// Enable GPIO1 and 2 Edge
-	hid_edge_write_register(handle, EDGE_FUNC_SEL_ADDR, 0b000000011);
-	// Output direction
-	hid_edge_write_register(handle, EDGE_DIR_ADDR, 0b000000011);
-	// Set to Zero
-	hid_edge_write_register(handle, EDGE_CLEAR_ADDR, 0b000000011);
-	sleep(1);
-	// Set to one
-	hid_edge_write_register(handle, EDGE_SET_ADDR,   0b000000011);
-	//return 0;
-	sleep(1);
-	//pwm_mode = 0b0000 0001 1010 0000;
-	pwm_mode = 0x1A0;
-	// 1400 2000
-	// PWM0 freq 1500hz, 266.667ns steps
-	hid_edge_write_register(handle, EDGE_PWM0_HIGH_ADDR, 1250);
-	hid_edge_write_register(handle, EDGE_PWM0_LOW_ADDR,  1250);
-	// Use E0 as PWM0 output in free run mode
-	hid_edge_write_register(handle, EDGE_PWM0_CTRL_ADDR, pwm_mode);
-	pwm_mode = 0x1A1;
-	// PWM1 freq 1500hz, 266.667ns steps
-	hid_edge_write_register(handle, EDGE_PWM1_HIGH_ADDR, 1250);
-	hid_edge_write_register(handle, EDGE_PWM1_LOW_ADDR,  1250);
-	// Use E1 as PWM1 output in free run mode
-	hid_edge_write_register(handle, EDGE_PWM1_CTRL_ADDR, pwm_mode);
-	return 0;
-}
-
-void open_EDGE_HID()
-{
-	// Exar XR22804
-	unsigned short VID = 0x04E2;
-	unsigned short EDGE_PID = 0x1200;
-	wchar_t wstr[MAX_STR];
-	int res;
-	hid_device *handle;
-
-	// Open the device using the VID, PID,
-	// and optionally the Serial number.
-	handle = hid_open(VID, EDGE_PID, NULL);
-	if (handle == NULL)
-	{
-        wprintf(L"Error on hid interface: NULL handle\n");
-        return ;
-	}
-	// Read the Manufacturer String
-	res = hid_get_manufacturer_string(handle, wstr, MAX_STR);
-	wprintf(L"Manufacturer String: %ls\n", wstr);
-
-	//*****************************************************************************************************************************************************************/
-	//
-	// Do a register read
-	//
-	wprintf(L"Init pwm\n");
-	initPWM(handle);
-	return ;
-	wprintf(L"Reading\n");
-	read_reg(handle, 0x3C0);
-	exit(0);
-
-	for (int addr = 0x3C0; addr < 0x3DD; addr++)
-	{
-		read_reg(handle, addr);
-	}
-	//exit(0);
+	*/
+#endif //READ_EEPROM
 }
 
 /**
@@ -417,15 +254,6 @@ int main(int argc, char* argv[])
         wprintf(L"Could not open the hid interface.\n");
         return 1;
     }
-	// List the HID devices
-	plist = hid_enumerate(VID, 0);
-	while (plist != NULL)
-	{
-		wprintf(L"%ls, %ls, 0x%x 0x%x\n", plist->manufacturer_string, plist->product_string, plist->vendor_id, plist->product_id);
-		plist = plist->next;
-	}
-	// Toggles E0 and E1 and sets the PWM output at 1500hz on them.
-	//open_EDGE_HID();
 
 	// Writes and reads to/from an EEPROM
 	open_I2C_HID();
